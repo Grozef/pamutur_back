@@ -104,7 +104,7 @@ class PMUController extends Controller
         }
 
         $careerStats = $horse->getCareerStats();
-        
+
         $data = [
             'horse' => [
                 'id' => $horse->id_cheval_pmu,
@@ -183,23 +183,24 @@ class PMUController extends Controller
      */
     public function getRacesByDate(Request $request): JsonResponse
     {
-        $date = $request->query('date', now()->format('Y-m-d'));
+        $date = $request->query('date', date('Y-m-d'));
 
         $races = Race::whereDate('race_date', $date)
             ->with('performances')
-            ->get()
-            ->map(function ($race) {
-                return [
-                    'id' => $race->id,
-                    'code' => $race->race_code,
-                    'date' => $race->race_date,
-                    'hippodrome' => $race->hippodrome,
-                    'distance' => $race->distance,
-                    'discipline' => $race->discipline,
-                    'participants' => $race->getParticipantsCount()
-                ];
-            });
+            ->get();
 
-        return response()->json($races);
+        $mapped = $races->map(function ($race) {
+            return [
+                'id' => $race->id,
+                'code' => $race->race_code,
+                'date' => $race->race_date->toIso8601String(), // ← CORRECTION ICI
+                'hippodrome' => $race->hippodrome,
+                'distance' => $race->distance,
+                'discipline' => $race->discipline,
+                'participants' => $race->getParticipantsCount()
+            ];
+        });
+
+        return response()->json($mapped->values()); // ← Ajouter ->values()
     }
 }

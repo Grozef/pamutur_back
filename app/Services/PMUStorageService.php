@@ -102,8 +102,8 @@ class PMUStorageService
                 'jockey_id' => $jockey?->id,
                 'trainer_id' => $trainer?->id,
                 'rank' => null, // Will be updated after race
-                'weight' => isset($participant['handicapPoids']) 
-                    ? (int)($participant['handicapPoids'] * 1000) 
+                'weight' => isset($participant['handicapPoids'])
+                    ? (int)($participant['handicapPoids'] )
                     : null,
                 'draw' => $participant['placeCorde'] ?? null,
                 'raw_musique' => $participant['musique'] ?? null,
@@ -162,7 +162,7 @@ class PMUStorageService
         if (!$sex) return null;
 
         $sexUpper = strtoupper($sex);
-        
+
         if (in_array($sexUpper, ['M', 'MALE'])) return 'MALES';
         if (in_array($sexUpper, ['F', 'FEMELLE'])) return 'FEMELLES';
         if (in_array($sexUpper, ['H', 'HONGRE'])) return 'HONGRES';

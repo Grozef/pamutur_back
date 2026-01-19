@@ -34,7 +34,7 @@ class FetchPMUData extends Command
     public function handle(): int
     {
         $date = $this->argument('date') ?? $this->fetcher->getTodayDate();
-        
+
         $this->info("Fetching PMU data for date: {$date}");
 
         // If specific reunion/course specified
@@ -63,19 +63,20 @@ class FetchPMUData extends Command
         }
 
         $reunions = $programme['programme']['reunions'];
+        // dd($reunions);
         $progressBar = $this->output->createProgressBar(count($reunions));
         $progressBar->start();
 
         foreach ($reunions as $reunion) {
-            $reunionNum = $reunion['numOrdre'];
-            
+            $reunionNum = $reunion['numOfficiel'];
+
             if (isset($reunion['courses'])) {
                 foreach ($reunion['courses'] as $course) {
                     $courseNum = $course['numOrdre'];
                     $this->fetchAndStoreCourse($date, $reunionNum, $courseNum);
                 }
             }
-            
+
             $progressBar->advance();
         }
 
@@ -92,7 +93,7 @@ class FetchPMUData extends Command
     private function fetchSpecificCourse(string $date, int $reunionNum, int $courseNum): int
     {
         $this->info("Fetching R{$reunionNum}C{$courseNum}");
-        
+
         if ($this->fetchAndStoreCourse($date, $reunionNum, $courseNum)) {
             $this->info("✓ Course stored successfully");
             return Command::SUCCESS;
