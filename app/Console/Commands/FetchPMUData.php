@@ -63,7 +63,6 @@ class FetchPMUData extends Command
         }
 
         $reunions = $programme['programme']['reunions'];
-        // dd($reunions);
         $progressBar = $this->output->createProgressBar(count($reunions));
         $progressBar->start();
 

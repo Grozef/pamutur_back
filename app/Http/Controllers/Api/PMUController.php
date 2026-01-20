@@ -9,6 +9,9 @@ use App\Services\PMUStatisticsService;
 use App\Services\PMUFetcherService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+use App\Http\Requests\RaceRequest;
+use App\Http\Requests\SearchRequest;
 
 class PMUController extends Controller
 {
@@ -24,46 +27,77 @@ class PMUController extends Controller
     /**
      * Get today's programme (proxy to PMU API)
      */
-    public function getProgramme(Request $request): JsonResponse
+    public function getProgramme(string $date): JsonResponse
     {
-        $date = $request->query('date', $this->fetcher->getTodayDate());
-        $data = $this->fetcher->fetchProgramme($date);
+        try {
+            $data = $this->fetcher->fetchProgramme($date);
 
-        if (!$data) {
-            return response()->json(['error' => 'Failed to fetch programme'], 500);
+            if (!$data) {
+                Log::warning('Programme not found', ['date' => $date]);
+                return response()->json(['error' => 'Programme not found for date'], 404);
+            }
+
+            return response()->json($data);
+        } catch (\Exception $e) {
+            Log::error('Failed to fetch programme', [
+                'date' => $date,
+                'error' => $e->getMessage()
+            ]);
+            return response()->json(['error' => 'Internal server error'], 500);
         }
-
-        return response()->json($data);
     }
 
     /**
      * Get reunion data
      */
-    public function getReunion(Request $request, int $reunionNum): JsonResponse
+    public function getReunion(string $date, int $reunionNum): JsonResponse
     {
-        $date = $request->query('date', $this->fetcher->getTodayDate());
-        $data = $this->fetcher->fetchReunion($date, $reunionNum);
+        try {
+            $data = $this->fetcher->fetchReunion($date, $reunionNum);
 
-        if (!$data) {
-            return response()->json(['error' => 'Failed to fetch reunion'], 500);
+            if (!$data) {
+                Log::warning('Reunion not found', ['date' => $date, 'reunion' => $reunionNum]);
+                return response()->json(['error' => 'Reunion not found'], 404);
+            }
+
+            return response()->json($data);
+        } catch (\Exception $e) {
+            Log::error('Failed to fetch reunion', [
+                'date' => $date,
+                'reunion' => $reunionNum,
+                'error' => $e->getMessage()
+            ]);
+            return response()->json(['error' => 'Internal server error'], 500);
         }
-
-        return response()->json($data);
     }
 
     /**
      * Get course participants
      */
-    public function getParticipants(Request $request, int $reunionNum, int $courseNum): JsonResponse
+    public function getParticipants(string $date, int $reunionNum, int $courseNum): JsonResponse
     {
-        $date = $request->query('date', $this->fetcher->getTodayDate());
-        $data = $this->fetcher->fetchCourse($date, $reunionNum, $courseNum);
+        try {
+            $data = $this->fetcher->fetchCourse($date, $reunionNum, $courseNum);
 
-        if (!$data) {
-            return response()->json(['error' => 'Failed to fetch course'], 500);
+            if (!$data) {
+                Log::warning('Course not found', [
+                    'date' => $date,
+                    'reunion' => $reunionNum,
+                    'course' => $courseNum
+                ]);
+                return response()->json(['error' => 'Course not found'], 404);
+            }
+
+            return response()->json($data);
+        } catch (\Exception $e) {
+            Log::error('Failed to fetch course', [
+                'date' => $date,
+                'reunion' => $reunionNum,
+                'course' => $courseNum,
+                'error' => $e->getMessage()
+            ]);
+            return response()->json(['error' => 'Internal server error'], 500);
         }
-
-        return response()->json($data);
     }
 
     /**
@@ -163,13 +197,9 @@ class PMUController extends Controller
     /**
      * Search horses by name
      */
-    public function searchHorses(Request $request): JsonResponse
+    public function searchHorses(SearchRequest $request): JsonResponse
     {
-        $query = $request->query('q');
-
-        if (!$query || strlen($query) < 3) {
-            return response()->json(['error' => 'Query too short'], 400);
-        }
+        $query = $request->validated()['q'];
 
         $horses = Horse::where('name', 'LIKE', "%{$query}%")
             ->limit(20)
@@ -181,9 +211,10 @@ class PMUController extends Controller
     /**
      * Get races by date
      */
-    public function getRacesByDate(Request $request): JsonResponse
+    public function getRacesByDate(RaceRequest $request): JsonResponse
     {
-        $date = $request->query('date', date('Y-m-d'));
+        $dateParam = $request->query('date', date('Y-m-d'));
+        $date = $this->normalizeDateFormat($dateParam);
 
         $races = Race::whereDate('race_date', $date)
             ->with('performances')
@@ -202,5 +233,52 @@ class PMUController extends Controller
         });
 
         return response()->json($mapped->values()); // ← Ajouter ->values()
+    }
+
+    /**
+     * Find race by code
+     */
+    public function findRaceByCode(Request $request): JsonResponse
+    {
+        $code = $request->query('code');
+
+        if (!$code) {
+            return response()->json(['error' => 'Code parameter required'], 400);
+        }
+
+        $race = Race::where('race_code', $code)->first();
+
+        if (!$race) {
+            return response()->json(['error' => 'Race not found'], 404);
+        }
+
+        return response()->json([
+            'id' => $race->id,
+            'code' => $race->race_code,
+            'date' => $race->race_date->toIso8601String(),
+            'hippodrome' => $race->hippodrome,
+            'distance' => $race->distance,
+            'discipline' => $race->discipline
+        ]);
+    }
+
+    /**
+     * Normalize date format - accept both Y-m-d and dmY formats
+     */
+    private function normalizeDateFormat(string $date): string
+    {
+        // Accept both Y-m-d and dmY formats
+        if (strlen($date) === 10 && strpos($date, '-') !== false) {
+            // Already in Y-m-d format
+            return $date;
+        }
+
+        if (strlen($date) === 8) {
+            // Convert dmY to Y-m-d
+            $dateObj = \DateTime::createFromFormat('dmY', $date);
+            return $dateObj ? $dateObj->format('Y-m-d') : $date;
+        }
+
+        return $date;
     }
 }
