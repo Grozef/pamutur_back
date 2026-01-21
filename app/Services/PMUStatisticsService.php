@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Horse;
 use App\Models\Performance;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 
 class PMUStatisticsService
 {
@@ -14,14 +15,36 @@ class PMUStatisticsService
      */
     public function calculateProbability(Performance $performance): float
     {
+        $startTime = microtime(true);
+
         $formScore = $this->calculateFormScore($performance);
         $classScore = $this->calculateClassScore($performance);
         $jockeyScore = $this->calculateJockeyScore($performance);
         $aptitudeScore = $this->calculateAptitudeScore($performance);
 
-        $rawScore = ($formScore * 4) + ($classScore * 2.5) + ($jockeyScore * 2.5) + ($aptitudeScore * 1);
+        // FIXED: Use correct weights (40%, 25%, 25%, 10%) and normalize to 0-100
+        $weightedScore = ($formScore * 0.4) + ($classScore * 0.25) +
+                        ($jockeyScore * 0.25) + ($aptitudeScore * 0.1);
 
-        return max(1, min(100, $rawScore));
+        // Convert from 0-10 scale to 0-100 scale
+        $finalScore = max(1, min(100, $weightedScore * 10));
+
+        // Log performance
+        $duration = (microtime(true) - $startTime) * 1000;
+        Log::channel('algorithm')->info('Probability calculated', [
+            'horse_id' => $performance->horse_id,
+            'race_id' => $performance->race_id,
+            'scores' => [
+                'form' => round($formScore, 2),
+                'class' => round($classScore, 2),
+                'jockey' => round($jockeyScore, 2),
+                'aptitude' => round($aptitudeScore, 2),
+                'final' => round($finalScore, 2)
+            ],
+            'duration_ms' => round($duration, 2)
+        ]);
+
+        return $finalScore;
     }
 
     /**
@@ -54,7 +77,8 @@ class PMUStatisticsService
         $currentYear = (int)date('Y');
         $results = [];
 
-        preg_match_all('/(\d+[a-zA-Z]|\([0-9]{2}\)|[DT]a[a-z]?)/', $musique, $matches);
+        // FIXED: Improved regex to catch all patterns including Dai, Tombé, Arrêté, 0, etc.
+        preg_match_all('/(\d+[a-zA-Z]+|\([0-9]{2}\)|[DT]a[a-z]*|Tombé|Arr[êe]t[ée]?|0[a-zA-Z]*)/', $musique, $matches);
 
         $activeYear = $currentYear;
 
@@ -94,13 +118,14 @@ class PMUStatisticsService
         foreach ($results as $result) {
             $rank = (int)preg_replace('/[^0-9]/', '', $result);
 
+            // FIXED: Use correct points according to documentation
             if ($rank === 1) $score += 10;
-            elseif ($rank === 2) $score += 8;
-            elseif ($rank === 3) $score += 6;
-            elseif ($rank === 4) $score += 4;
-            elseif ($rank === 5) $score += 3;
-            elseif (preg_match('/[DT]/', $result)) $score += 0;
-            else $score += 2;
+            elseif ($rank === 2) $score += 7;  // Fixed from 8 to 7
+            elseif ($rank === 3) $score += 5;  // Fixed from 6 to 5
+            elseif ($rank === 4) $score += 3;  // Fixed from 4 to 3
+            elseif ($rank === 5) $score += 2;  // Fixed from 3 to 2
+            elseif (preg_match('/[DT]|Tombé|Arr/', $result)) $score += 0;
+            else $score += 1;  // Other positions
         }
 
         return min(10, $score / count($results));
@@ -114,7 +139,10 @@ class PMUStatisticsService
         $stats = $horse->getCareerStats();
         if ($stats['total_races'] === 0) return 5.0;
 
-        $winRateBonus = $stats['win_rate'] / 10;
+        // Add confidence factor based on number of races
+        $confidenceFactor = min(1.0, $stats['total_races'] / 20);
+
+        $winRateBonus = ($stats['win_rate'] / 10) * $confidenceFactor;
         $avgGains = $stats['average_gains'];
         $earningsScore = min(5, ($avgGains / 2000));
 
@@ -147,15 +175,20 @@ class PMUStatisticsService
     {
         $score = 5.0;
 
-        if ($performance->draw) {
-            if ($performance->draw <= 3) {
-                $score += 2;
-            } elseif ($performance->draw <= 5) {
-                $score += 1;
-            } elseif ($performance->draw >= 12) {
-                $score -= 2;
-            } elseif ($performance->draw >= 10) {
-                $score -= 1;
+        if ($performance->draw && $performance->race) {
+            $totalRunners = $performance->race->getParticipantsCount();
+            if ($totalRunners > 0) {
+                $drawPercentile = $performance->draw / $totalRunners;
+
+                if ($drawPercentile <= 0.2) {
+                    $score += 2;
+                } elseif ($drawPercentile <= 0.4) {
+                    $score += 1;
+                } elseif ($drawPercentile >= 0.8) {
+                    $score -= 2;
+                } elseif ($drawPercentile >= 0.6) {
+                    $score -= 1;
+                }
             }
         }
 
@@ -174,9 +207,6 @@ class PMUStatisticsService
         return max(0, min(10, $score));
     }
 
-    /**
-     * Detect race scenario based on score gaps
-     */
     private function detectRaceScenario(array $sortedScores): array
     {
         $count = count($sortedScores);
@@ -189,13 +219,11 @@ class PMUStatisticsService
             ];
         }
 
-        // Calculate gaps
         $gaps = [];
         for ($i = 0; $i < min($count - 1, 5); $i++) {
             $gaps[$i] = $sortedScores[$i]['score'] - $sortedScores[$i + 1]['score'];
         }
 
-        // Scenario 1: SUPERFAVORI (1 cheval domine)
         if (isset($gaps[0]) && $gaps[0] > 15) {
             return [
                 'scenario' => 'DOMINANT_FAVORITE',
@@ -208,7 +236,6 @@ class PMUStatisticsService
             ];
         }
 
-        // Scenario 2: DUO DE TÊTE
         if (isset($gaps[0], $gaps[1]) && $gaps[0] > 10 && $gaps[1] > 10) {
             return [
                 'scenario' => 'CLEAR_TOP_2',
@@ -219,12 +246,9 @@ class PMUStatisticsService
             ];
         }
 
-        // Check if top is grouped
-        $topGrouped = isset($gaps[0], $gaps[1]) &&
-                      max($gaps[0], $gaps[1]) <= 5;
+        $topGrouped = isset($gaps[0], $gaps[1]) && max($gaps[0], $gaps[1]) <= 5;
 
         if ($topGrouped) {
-            // Check for TOP 5 GROUPED
             if (isset($gaps[2], $gaps[3]) && $gaps[2] <= 5 && $gaps[3] <= 5) {
                 return [
                     'scenario' => 'GROUPED_TOP_5',
@@ -235,7 +259,6 @@ class PMUStatisticsService
                 ];
             }
 
-            // Check for TOP 4 GROUPED
             if (isset($gaps[2]) && $gaps[2] <= 5) {
                 return [
                     'scenario' => 'GROUPED_TOP_4',
@@ -245,24 +268,16 @@ class PMUStatisticsService
                     'description' => 'Top 4 groupé'
                 ];
             }
-        }
 
-        // Check for OPEN RACE (all between 50-70)
-        $allScores = array_column($sortedScores, 'score');
-        $maxScore = max($allScores);
-        $minScore = min($allScores);
-
-        if ($maxScore <= 70 && $minScore >= 50) {
             return [
-                'scenario' => 'OPEN_RACE',
+                'scenario' => 'GROUPED_TOP_3',
                 'top_size' => 3,
-                'top_percentage' => 60,
-                'rest_percentage' => 40,
-                'description' => 'Course ouverte'
+                'top_percentage' => 70,
+                'rest_percentage' => 30,
+                'description' => 'Top 3 groupé'
             ];
         }
 
-        // Default: TOP 3 STANDARD
         return [
             'scenario' => 'STANDARD_TOP_3',
             'top_size' => 3,
@@ -272,12 +287,11 @@ class PMUStatisticsService
         ];
     }
 
-    /**
-     * Get race predictions with adaptive algorithm
-     */
     public function getRacePredictions(int $raceId): Collection
     {
-        $performances = Performance::with(['horse', 'jockey', 'trainer'])
+        $startTime = microtime(true);
+
+        $performances = Performance::with(['horse', 'jockey', 'trainer', 'race'])
             ->where('race_id', $raceId)
             ->get();
 
@@ -285,7 +299,6 @@ class PMUStatisticsService
             return collect([]);
         }
 
-        // Calculate raw scores
         $scoredHorses = $performances->map(function ($performance) {
             return [
                 'performance' => $performance,
@@ -299,43 +312,45 @@ class PMUStatisticsService
             ];
         })->sortByDesc('score')->values();
 
-        // Detect scenario
         $scenario = $this->detectRaceScenario($scoredHorses->toArray());
-
-        // Distribute probabilities based on scenario
         $predictions = $this->distributeProbabilities($scoredHorses, $scenario);
 
-        // Add scenario info to first prediction for UI display
         if ($predictions->isNotEmpty()) {
             $firstPrediction = $predictions->first();
             $firstPrediction['race_scenario'] = $scenario;
         }
 
+        $duration = (microtime(true) - $startTime) * 1000;
+        Log::channel('algorithm')->info('Race predictions calculated', [
+            'race_id' => $raceId,
+            'horses_count' => $predictions->count(),
+            'scenario' => $scenario['scenario'],
+            'duration_ms' => round($duration, 2)
+        ]);
+
         return $predictions;
     }
 
-    /**
-     * Distribute probabilities based on detected scenario
-     */
     private function distributeProbabilities(Collection $scoredHorses, array $scenario): Collection
     {
         $totalHorses = $scoredHorses->count();
 
+        // FIXED: Handle edge case
+        if ($totalHorses <= 3) {
+            return $this->distributeEqual($scoredHorses);
+        }
+
         switch ($scenario['scenario']) {
             case 'DOMINANT_FAVORITE':
                 return $this->distributeDominantFavorite($scoredHorses, $scenario);
-
             case 'CLEAR_TOP_2':
                 return $this->distributeClearTop2($scoredHorses, $scenario);
-
             case 'GROUPED_TOP_4':
             case 'GROUPED_TOP_5':
+            case 'GROUPED_TOP_3':
             case 'STANDARD_TOP_3':
-            case 'OPEN_RACE':
                 return $this->distributeGroupedTop($scoredHorses, $scenario);
-
             default:
-                // Fallback to equal distribution
                 return $this->distributeEqual($scoredHorses);
         }
     }
@@ -344,7 +359,7 @@ class PMUStatisticsService
     {
         $totalHorses = $scoredHorses->count();
 
-        return $scoredHorses->map(function ($horse, $index) use ($scenario, $totalHorses) {
+        return $scoredHorses->map(function ($horse, $index) use ($totalHorses) {
             if ($index === 0) {
                 $probability = 50.0;
             } elseif ($index === 1) {
@@ -352,9 +367,8 @@ class PMUStatisticsService
             } elseif ($index === 2) {
                 $probability = 12.0;
             } else {
-                // Distribute 20% among the rest
-                $remaining = $totalHorses - 3;
-                $probability = $remaining > 0 ? 20.0 / $remaining : 0;
+                $remaining = max(1, $totalHorses - 3);
+                $probability = 20.0 / $remaining;
             }
 
             return [
@@ -407,25 +421,22 @@ class PMUStatisticsService
         $topPercentage = $scenario['top_percentage'];
         $restPercentage = $scenario['rest_percentage'];
 
-        // Calculate total score for top group
         $topGroup = $scoredHorses->take($topSize);
         $topTotalScore = $topGroup->sum('score');
 
-        // Calculate total score for rest
         $restGroup = $scoredHorses->slice($topSize);
         $restTotalScore = $restGroup->sum('score');
 
-        return $scoredHorses->map(function ($horse, $index) use ($topSize, $topPercentage, $restPercentage, $topTotalScore, $restTotalScore) {
+        return $scoredHorses->map(function ($horse, $index) use ($topSize, $topPercentage, $restPercentage, $topTotalScore, $restTotalScore, $scoredHorses) {
             if ($index < $topSize) {
-                // In top group - proportional distribution
                 $probability = $topTotalScore > 0
                     ? ($horse['score'] / $topTotalScore) * $topPercentage
                     : $topPercentage / $topSize;
             } else {
-                // In rest - proportional distribution
+                $restCount = max(1, $scoredHorses->count() - $topSize);
                 $probability = $restTotalScore > 0
                     ? ($horse['score'] / $restTotalScore) * $restPercentage
-                    : $restPercentage / max(1, count($scoredHorses) - $topSize);
+                    : $restPercentage / $restCount;
             }
 
             return [
@@ -446,7 +457,7 @@ class PMUStatisticsService
     private function distributeEqual(Collection $scoredHorses): Collection
     {
         $count = $scoredHorses->count();
-        $probability = 100.0 / $count;
+        $probability = 100.0 / max(1, $count);
 
         return $scoredHorses->map(function ($horse, $index) use ($probability) {
             return [
@@ -464,9 +475,6 @@ class PMUStatisticsService
         });
     }
 
-    /**
-     * Detect value bet
-     */
     private function isValueBet(float $calculatedProb, ?float $oddsRef): bool
     {
         if (!$oddsRef || $oddsRef <= 1) return false;
@@ -480,9 +488,6 @@ class PMUStatisticsService
         return $relativeEdge || $absoluteEdge;
     }
 
-    /**
-     * Get stallion progeny statistics
-     */
     public function getStallionProgenyStats(string $horseId): array
     {
         $horse = Horse::find($horseId);

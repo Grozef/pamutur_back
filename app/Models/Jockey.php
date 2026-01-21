@@ -9,39 +9,49 @@ class Jockey extends Model
 {
     protected $fillable = ['name'];
 
-    /**
-     * Get performances for this jockey
-     */
     public function performances(): HasMany
     {
         return $this->hasMany(Performance::class);
     }
 
     /**
-     * Calculate jockey success rate
+     * FIXED: Calculate jockey success rate with single query
      */
     public function getSuccessRate(): float
     {
-        $total = $this->performances()->count();
-        if ($total === 0) return 0.0;
+        $stats = $this->performances()
+            ->whereNotNull('rank')
+            ->selectRaw('
+                COUNT(*) as total,
+                SUM(CASE WHEN rank = 1 THEN 1 ELSE 0 END) as wins
+            ')
+            ->first();
 
-        $wins = $this->performances()->where('rank', 1)->count();
-        return ($wins / $total) * 100;
+        if (!$stats || $stats->total === 0) {
+            return 0.0;
+        }
+
+        return ($stats->wins / $stats->total) * 100;
     }
 
     /**
-     * Get synergy with a specific trainer
+     * FIXED: Get synergy with a specific trainer using single query
      */
     public function getSynergyWithTrainer(int $trainerId): float
     {
-        $total = $this->performances()->where('trainer_id', $trainerId)->count();
-        if ($total === 0) return 0.0;
-
-        $wins = $this->performances()
+        $stats = $this->performances()
             ->where('trainer_id', $trainerId)
-            ->where('rank', 1)
-            ->count();
+            ->whereNotNull('rank')
+            ->selectRaw('
+                COUNT(*) as total,
+                SUM(CASE WHEN rank = 1 THEN 1 ELSE 0 END) as wins
+            ')
+            ->first();
 
-        return ($wins / $total) * 100;
+        if (!$stats || $stats->total === 0) {
+            return 0.0;
+        }
+
+        return ($stats->wins / $stats->total) * 100;
     }
 }

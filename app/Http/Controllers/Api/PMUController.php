@@ -10,6 +10,7 @@ use App\Services\PMUFetcherService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 use App\Http\Requests\RaceRequest;
 use App\Http\Requests\SearchRequest;
 
@@ -30,7 +31,12 @@ class PMUController extends Controller
     public function getProgramme(string $date): JsonResponse
     {
         try {
-            $data = $this->fetcher->fetchProgramme($date);
+            // Cache programme for 30 minutes
+            $cacheKey = "pmu_programme_{$date}";
+
+            $data = Cache::remember($cacheKey, 1800, function() use ($date) {
+                return $this->fetcher->fetchProgramme($date);
+            });
 
             if (!$data) {
                 Log::warning('Programme not found', ['date' => $date]);
@@ -53,7 +59,11 @@ class PMUController extends Controller
     public function getReunion(string $date, int $reunionNum): JsonResponse
     {
         try {
-            $data = $this->fetcher->fetchReunion($date, $reunionNum);
+            $cacheKey = "pmu_reunion_{$date}_R{$reunionNum}";
+
+            $data = Cache::remember($cacheKey, 1800, function() use ($date, $reunionNum) {
+                return $this->fetcher->fetchReunion($date, $reunionNum);
+            });
 
             if (!$data) {
                 Log::warning('Reunion not found', ['date' => $date, 'reunion' => $reunionNum]);
@@ -77,7 +87,11 @@ class PMUController extends Controller
     public function getParticipants(string $date, int $reunionNum, int $courseNum): JsonResponse
     {
         try {
-            $data = $this->fetcher->fetchCourse($date, $reunionNum, $courseNum);
+            $cacheKey = "pmu_participants_{$date}_R{$reunionNum}C{$courseNum}";
+
+            $data = Cache::remember($cacheKey, 1800, function() use ($date, $reunionNum, $courseNum) {
+                return $this->fetcher->fetchCourse($date, $reunionNum, $courseNum);
+            });
 
             if (!$data) {
                 Log::warning('Course not found', [
@@ -101,7 +115,7 @@ class PMUController extends Controller
     }
 
     /**
-     * Get race predictions (calculated probabilities)
+     * Get race predictions (calculated probabilities) with caching
      */
     public function getRacePredictions(int $raceId): JsonResponse
     {
@@ -111,17 +125,37 @@ class PMUController extends Controller
             return response()->json(['error' => 'Race not found'], 404);
         }
 
-        $predictions = $this->stats->getRacePredictions($raceId);
+        // Cache predictions for 1 hour
+        $cacheKey = "race_predictions_{$raceId}";
+
+        $predictions = Cache::remember($cacheKey, 3600, function() use ($raceId) {
+            return $this->stats->getRacePredictions($raceId);
+        });
 
         return response()->json([
             'race' => [
                 'id' => $race->id,
-                'date' => $race->race_date,
+                'date' => $race->race_date->format('c'), // FIXED: Use format('c') for ISO 8601
                 'hippodrome' => $race->hippodrome,
                 'distance' => $race->distance,
                 'discipline' => $race->discipline
             ],
-            'predictions' => $predictions
+            'predictions' => $predictions,
+            'cached' => Cache::has($cacheKey),
+            'cache_expires_at' => now()->addHour()->toIso8601String()
+        ]);
+    }
+
+    /**
+     * Clear cache for a specific race (useful after race results are updated)
+     */
+    public function clearRaceCache(int $raceId): JsonResponse
+    {
+        Cache::forget("race_predictions_{$raceId}");
+
+        return response()->json([
+            'message' => 'Cache cleared successfully',
+            'race_id' => $raceId
         ]);
     }
 
@@ -130,52 +164,60 @@ class PMUController extends Controller
      */
     public function getHorseDetails(string $horseId): JsonResponse
     {
-        $horse = Horse::with(['father', 'mother', 'performances.race'])
-            ->find($horseId);
+        $cacheKey = "horse_details_{$horseId}";
 
-        if (!$horse) {
+        $data = Cache::remember($cacheKey, 7200, function() use ($horseId) {
+            $horse = Horse::with(['father', 'mother', 'performances.race'])
+                ->find($horseId);
+
+            if (!$horse) {
+                return null;
+            }
+
+            $careerStats = $horse->getCareerStats();
+
+            return [
+                'horse' => [
+                    'id' => $horse->id_cheval_pmu,
+                    'name' => $horse->name,
+                    'sex' => $horse->sex,
+                    'age' => $horse->age,
+                    'breed' => $horse->breed
+                ],
+                'genealogy' => [
+                    'father' => $horse->father ? [
+                        'id' => $horse->father->id_cheval_pmu,
+                        'name' => $horse->father->name
+                    ] : null,
+                    'mother' => $horse->mother ? [
+                        'id' => $horse->mother->id_cheval_pmu,
+                        'name' => $horse->mother->name
+                    ] : null,
+                    'dam_sire' => $horse->dam_sire_name
+                ],
+                'career_stats' => $careerStats,
+                'recent_performances' => $horse->performances()
+                    ->with(['race', 'jockey', 'trainer'])
+                    ->orderBy('created_at', 'desc')
+                    ->limit(10)
+                    ->get()
+                    ->map(function ($perf) {
+                        return [
+                            'date' => $perf->race->race_date->format('Y-m-d'),
+                            'hippodrome' => $perf->race->hippodrome,
+                            'distance' => $perf->race->distance,
+                            'rank' => $perf->rank,
+                            'jockey' => $perf->jockey?->name,
+                            'trainer' => $perf->trainer?->name,
+                            'odds' => $perf->odds_ref
+                        ];
+                    })
+            ];
+        });
+
+        if (!$data) {
             return response()->json(['error' => 'Horse not found'], 404);
         }
-
-        $careerStats = $horse->getCareerStats();
-
-        $data = [
-            'horse' => [
-                'id' => $horse->id_cheval_pmu,
-                'name' => $horse->name,
-                'sex' => $horse->sex,
-                'age' => $horse->age,
-                'breed' => $horse->breed
-            ],
-            'genealogy' => [
-                'father' => $horse->father ? [
-                    'id' => $horse->father->id_cheval_pmu,
-                    'name' => $horse->father->name
-                ] : null,
-                'mother' => $horse->mother ? [
-                    'id' => $horse->mother->id_cheval_pmu,
-                    'name' => $horse->mother->name
-                ] : null,
-                'dam_sire' => $horse->dam_sire_name
-            ],
-            'career_stats' => $careerStats,
-            'recent_performances' => $horse->performances()
-                ->with(['race', 'jockey', 'trainer'])
-                ->orderBy('created_at', 'desc')
-                ->limit(10)
-                ->get()
-                ->map(function ($perf) {
-                    return [
-                        'date' => $perf->race->race_date,
-                        'hippodrome' => $perf->race->hippodrome,
-                        'distance' => $perf->race->distance,
-                        'rank' => $perf->rank,
-                        'jockey' => $perf->jockey?->name,
-                        'trainer' => $perf->trainer?->name,
-                        'odds' => $perf->odds_ref
-                    ];
-                })
-        ];
 
         return response()->json($data);
     }
@@ -185,7 +227,11 @@ class PMUController extends Controller
      */
     public function getStallionStats(string $horseId): JsonResponse
     {
-        $stats = $this->stats->getStallionProgenyStats($horseId);
+        $cacheKey = "stallion_stats_{$horseId}";
+
+        $stats = Cache::remember($cacheKey, 7200, function() use ($horseId) {
+            return $this->stats->getStallionProgenyStats($horseId);
+        });
 
         if (empty($stats)) {
             return response()->json(['error' => 'Horse not found'], 404);
@@ -216,15 +262,19 @@ class PMUController extends Controller
         $dateParam = $request->query('date', date('Y-m-d'));
         $date = $this->normalizeDateFormat($dateParam);
 
-        $races = Race::whereDate('race_date', $date)
-            ->with('performances')
-            ->get();
+        $cacheKey = "races_by_date_{$date}";
+
+        $races = Cache::remember($cacheKey, 1800, function() use ($date) {
+            return Race::whereDate('race_date', $date)
+                ->with('performances')
+                ->get();
+        });
 
         $mapped = $races->map(function ($race) {
             return [
                 'id' => $race->id,
                 'code' => $race->race_code,
-                'date' => $race->race_date->toIso8601String(), // ← CORRECTION ICI
+                'date' => $race->race_date->format('c'), // FIXED: Use format('c')
                 'hippodrome' => $race->hippodrome,
                 'distance' => $race->distance,
                 'discipline' => $race->discipline,
@@ -232,7 +282,7 @@ class PMUController extends Controller
             ];
         });
 
-        return response()->json($mapped->values()); // ← Ajouter ->values()
+        return response()->json($mapped->values());
     }
 
     /**
@@ -255,7 +305,7 @@ class PMUController extends Controller
         return response()->json([
             'id' => $race->id,
             'code' => $race->race_code,
-            'date' => $race->race_date->toIso8601String(),
+            'date' => $race->race_date->format('c'), // FIXED: Use format('c')
             'hippodrome' => $race->hippodrome,
             'distance' => $race->distance,
             'discipline' => $race->discipline
@@ -267,18 +317,28 @@ class PMUController extends Controller
      */
     private function normalizeDateFormat(string $date): string
     {
-        // Accept both Y-m-d and dmY formats
         if (strlen($date) === 10 && strpos($date, '-') !== false) {
-            // Already in Y-m-d format
             return $date;
         }
 
         if (strlen($date) === 8) {
-            // Convert dmY to Y-m-d
             $dateObj = \DateTime::createFromFormat('dmY', $date);
             return $dateObj ? $dateObj->format('Y-m-d') : $date;
         }
 
         return $date;
+    }
+
+    /**
+     * Health check endpoint
+     */
+    public function health(): JsonResponse
+    {
+        return response()->json([
+            'status' => 'healthy',
+            'timestamp' => now()->toIso8601String(),
+            'cache_driver' => config('cache.default'),
+            'version' => 'v1'
+        ]);
     }
 }

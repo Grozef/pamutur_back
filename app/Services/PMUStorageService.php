@@ -9,24 +9,22 @@ use App\Models\Race;
 use App\Models\Performance;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class PMUStorageService
 {
-    /**
-     * Store complete race data with participants
-     */
     public function storeRaceData(array $data, string $date, int $reunionNum, int $courseNum): ?Race
     {
         try {
             DB::beginTransaction();
 
-            // Create or update race
             $race = $this->createRace($data, $date, $reunionNum, $courseNum);
 
-            // Store participants
             if (isset($data['participants']) && is_array($data['participants'])) {
                 foreach ($data['participants'] as $participant) {
-                    $this->storeParticipant($participant, $race);
+                    if ($this->validateParticipant($participant)) {
+                        $this->storeParticipant($participant, $race);
+                    }
                 }
             }
 
@@ -38,24 +36,42 @@ class PMUStorageService
             Log::error("Error storing race data: {$e->getMessage()}", [
                 'date' => $date,
                 'reunion' => $reunionNum,
-                'course' => $courseNum
+                'course' => $courseNum,
+                'trace' => $e->getTraceAsString()
             ]);
             return null;
         }
     }
 
-    /**
-     * Create race record
-     */
     private function createRace(array $data, string $date, int $reunionNum, int $courseNum): Race
     {
+        // FIXED: Validate date format
         $raceDate = \DateTime::createFromFormat('dmY', $date);
+        if ($raceDate === false) {
+            throw new \InvalidArgumentException("Invalid date format: {$date}. Expected dmY format.");
+        }
+
+        // FIXED: Validate and parse time
         if (isset($data['heureDepart'])) {
-            $time = $data['heureDepart'];
-            $raceDate->setTime(
-                (int)substr($time, 0, 2),
-                (int)substr($time, 2, 2)
-            );
+            $time = str_pad($data['heureDepart'], 4, '0', STR_PAD_LEFT);
+
+            if (strlen($time) === 4 && ctype_digit($time)) {
+                $hour = (int)substr($time, 0, 2);
+                $minute = (int)substr($time, 2, 2);
+
+                // Validate hour and minute ranges
+                if ($hour >= 0 && $hour <= 23 && $minute >= 0 && $minute <= 59) {
+                    $raceDate->setTime($hour, $minute);
+                } else {
+                    Log::warning("Invalid time values", [
+                        'time' => $time,
+                        'hour' => $hour,
+                        'minute' => $minute
+                    ]);
+                }
+            } else {
+                Log::warning("Invalid time format", ['time' => $data['heureDepart']]);
+            }
         }
 
         return Race::updateOrCreate(
@@ -65,34 +81,27 @@ class PMUStorageService
             ],
             [
                 'hippodrome' => $data['hippodrome'] ?? null,
-                'distance' => $data['distance'] ?? null,
+                'distance' => $this->validateDistance($data['distance'] ?? null),
                 'discipline' => $data['discipline'] ?? null,
                 'track_condition' => $data['penetrometre'] ?? null
             ]
         );
     }
 
-    /**
-     * Store participant (horse) data
-     */
     private function storeParticipant(array $participant, Race $race): void
     {
-        // Create or get horse
         $horse = $this->createHorse($participant);
 
-        // Create or get jockey
         $jockey = null;
         if (!empty($participant['driver'])) {
             $jockey = Jockey::firstOrCreate(['name' => $participant['driver']]);
         }
 
-        // Create or get trainer
         $trainer = null;
         if (!empty($participant['entraineur'])) {
             $trainer = Trainer::firstOrCreate(['name' => $participant['entraineur']]);
         }
 
-        // Create performance record
         Performance::updateOrCreate(
             [
                 'horse_id' => $horse->id_cheval_pmu,
@@ -101,42 +110,46 @@ class PMUStorageService
             [
                 'jockey_id' => $jockey?->id,
                 'trainer_id' => $trainer?->id,
-                'rank' => null, // Will be updated after race
-                'weight' => isset($participant['handicapPoids'])
-                    ? (int)($participant['handicapPoids'] )
-                    : null,
+                'rank' => null,
+                'weight' => $this->validateWeight($participant['handicapPoids'] ?? null),
                 'draw' => $participant['placeCorde'] ?? null,
                 'raw_musique' => $participant['musique'] ?? null,
                 'odds_ref' => $participant['dernierRapportDirect'] ?? null,
-                'gains_race' => null // Will be updated after race
+                'gains_race' => null
             ]
         );
     }
 
-    /**
-     * Create or update horse with genealogy
-     */
     private function createHorse(array $participant): Horse
     {
         $horseId = $participant['idCheval'];
 
-        // Create father if exists
+        // Try to find existing father by name first
         $fatherId = null;
         if (!empty($participant['nomPere'])) {
-            $father = Horse::firstOrCreate(
-                ['id_cheval_pmu' => 'PERE_' . $participant['nomPere']],
-                ['name' => $participant['nomPere']]
-            );
+            $father = Horse::where('name', $participant['nomPere'])->first();
+
+            if (!$father) {
+                $father = Horse::firstOrCreate(
+                    ['id_cheval_pmu' => 'STALLION_' . Str::slug($participant['nomPere'])],
+                    ['name' => $participant['nomPere']]
+                );
+            }
+
             $fatherId = $father->id_cheval_pmu;
         }
 
-        // Create mother if exists
         $motherId = null;
         if (!empty($participant['nomMere'])) {
-            $mother = Horse::firstOrCreate(
-                ['id_cheval_pmu' => 'MERE_' . $participant['nomMere']],
-                ['name' => $participant['nomMere']]
-            );
+            $mother = Horse::where('name', $participant['nomMere'])->first();
+
+            if (!$mother) {
+                $mother = Horse::firstOrCreate(
+                    ['id_cheval_pmu' => 'MARE_' . Str::slug($participant['nomMere'])],
+                    ['name' => $participant['nomMere']]
+                );
+            }
+
             $motherId = $mother->id_cheval_pmu;
         }
 
@@ -145,7 +158,7 @@ class PMUStorageService
             [
                 'name' => $participant['nom'],
                 'sex' => $this->mapSex($participant['sexe'] ?? null),
-                'age' => $participant['age'] ?? null,
+                'age' => $this->validateAge($participant['age'] ?? null),
                 'father_id' => $fatherId,
                 'mother_id' => $motherId,
                 'dam_sire_name' => $participant['nomPereMere'] ?? null,
@@ -154,9 +167,6 @@ class PMUStorageService
         );
     }
 
-    /**
-     * Map sex from PMU format to database enum
-     */
     private function mapSex(?string $sex): ?string
     {
         if (!$sex) return null;
@@ -170,9 +180,6 @@ class PMUStorageService
         return null;
     }
 
-    /**
-     * Update performance with race results
-     */
     public function updateRaceResults(Race $race, array $results): void
     {
         foreach ($results as $result) {
@@ -182,10 +189,76 @@ class PMUStorageService
 
             if ($performance) {
                 $performance->update([
-                    'rank' => $result['classementArrivee'] ?? 0,
+                    'rank' => $result['classementArrivee'] ?? null,
                     'gains_race' => $result['gainsParticipant'] ?? 0
                 ]);
             }
         }
+    }
+
+    /**
+     * Validate participant data
+     */
+    private function validateParticipant(array $participant): bool
+    {
+        if (empty($participant['idCheval']) || empty($participant['nom'])) {
+            Log::warning("Missing required horse data", ['data' => $participant]);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Validate and sanitize age
+     */
+    private function validateAge(?int $age): ?int
+    {
+        if ($age === null) return null;
+
+        if ($age < 2 || $age > 25) {
+            Log::warning("Invalid age for horse", ['age' => $age]);
+            return null;
+        }
+
+        return $age;
+    }
+
+    /**
+     * Validate and sanitize weight
+     */
+    private function validateWeight($weight): ?int
+    {
+        if ($weight === null) return null;
+
+        $weightInt = (int)$weight;
+        $weightKg = $weightInt / 1000;
+
+        if ($weightKg < 40 || $weightKg > 80) {
+            Log::warning("Suspicious weight value", [
+                'weight_grams' => $weightInt,
+                'weight_kg' => $weightKg
+            ]);
+            // Accept it anyway but log
+        }
+
+        return $weightInt;
+    }
+
+    /**
+     * Validate distance
+     */
+    private function validateDistance($distance): ?int
+    {
+        if ($distance === null) return null;
+
+        $distanceInt = (int)$distance;
+
+        if ($distanceInt < 800 || $distanceInt > 6000) {
+            Log::warning("Invalid distance", ['distance' => $distanceInt]);
+            return null;
+        }
+
+        return $distanceInt;
     }
 }

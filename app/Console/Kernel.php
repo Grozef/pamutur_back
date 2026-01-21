@@ -15,6 +15,8 @@ class Kernel extends ConsoleKernel
         // Fetch daily PMU data at 6:00 AM
         $schedule->command('pmu:fetch')
             ->dailyAt('06:00')
+            ->dailyAt('13:00')
+            ->dailyAt('18:00')
             ->withoutOverlapping()
             ->appendOutputTo(storage_path('logs/pmu-fetch.log'));
 
