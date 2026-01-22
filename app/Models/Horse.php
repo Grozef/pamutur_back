@@ -50,7 +50,7 @@ class Horse extends Model
     }
 
     /**
-     * FIXED: Calculate average offspring win rate efficiently with single query
+     * Calculate average offspring win rate efficiently with single query
      */
     public function getOffspringWinRate(): float
     {
@@ -72,27 +72,48 @@ class Horse extends Model
     }
 
     /**
-     * Get horse career statistics
+     * Get horse career statistics (optimized with single SQL query)
      */
     public function getCareerStats(): array
     {
-        $performances = $this->performances;
+        $stats = $this->performances()
+            ->selectRaw('
+                COUNT(*) as total_races,
+                COUNT(rank) as completed_races,
+                SUM(CASE WHEN rank = 1 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN rank IN (1,2,3) THEN 1 ELSE 0 END) as places,
+                COALESCE(SUM(gains_race), 0) as total_gains
+            ')
+            ->first();
 
-        $totalRaces = $performances->count();
-        $completedRaces = $performances->whereNotNull('rank')->count();
-        $wins = $performances->where('rank', 1)->count();
-        $places = $performances->whereIn('rank', [1, 2, 3])->count();
-        $totalGains = $performances->sum('gains_race');
+        if (!$stats || $stats->total_races === 0) {
+            return [
+                'total_races' => 0,
+                'completed_races' => 0,
+                'wins' => 0,
+                'places' => 0,
+                'total_gains' => 0,
+                'average_gains' => 0,
+                'win_rate' => 0,
+                'place_rate' => 0,
+            ];
+        }
 
         return [
-            'total_races' => $totalRaces,
-            'completed_races' => $completedRaces,
-            'wins' => $wins,
-            'places' => $places,
-            'total_gains' => $totalGains,
-            'average_gains' => $totalRaces > 0 ? $totalGains / $totalRaces : 0,
-            'win_rate' => $completedRaces > 0 ? ($wins / $completedRaces) * 100 : 0,
-            'place_rate' => $completedRaces > 0 ? ($places / $completedRaces) * 100 : 0,
+            'total_races' => (int)$stats->total_races,
+            'completed_races' => (int)$stats->completed_races,
+            'wins' => (int)$stats->wins,
+            'places' => (int)$stats->places,
+            'total_gains' => (int)$stats->total_gains,
+            'average_gains' => $stats->total_races > 0
+                ? round($stats->total_gains / $stats->total_races, 2)
+                : 0,
+            'win_rate' => $stats->completed_races > 0
+                ? round(($stats->wins / $stats->completed_races) * 100, 2)
+                : 0,
+            'place_rate' => $stats->completed_races > 0
+                ? round(($stats->places / $stats->completed_races) * 100, 2)
+                : 0,
         ];
     }
 }

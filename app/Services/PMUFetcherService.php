@@ -8,7 +8,7 @@ use Illuminate\Support\Facades\Log;
 class PMUFetcherService
 {
     private const BASE_URL = 'https://online.turfinfo.api.pmu.fr/rest/client/1';
-    
+
     /**
      * Fetch daily program for a specific date
      */
@@ -16,20 +16,25 @@ class PMUFetcherService
     {
         try {
             $response = Http::timeout(30)->get(self::BASE_URL . "/programme/{$date}");
-            
+
             if ($response->successful()) {
                 return $response->json();
             }
-            
+
             Log::error("PMU API Error: {$response->status()}", [
+                'endpoint' => 'programme',
                 'date' => $date,
-                'body' => $response->body()
+                'status' => $response->status(),
+                'body_length' => strlen($response->body())
             ]);
-            
+
             return null;
         } catch (\Exception $e) {
-            Log::error("PMU Fetch Exception: {$e->getMessage()}", [
-                'date' => $date
+            Log::error("PMU Fetch Exception", [
+                'endpoint' => 'programme',
+                'date' => $date,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
             ]);
             return null;
         }
@@ -44,14 +49,28 @@ class PMUFetcherService
             $response = Http::timeout(30)->get(
                 self::BASE_URL . "/programme/{$date}/R{$reunionNum}"
             );
-            
+
             if ($response->successful()) {
                 return $response->json();
             }
-            
+
+            Log::error("PMU API Error: {$response->status()}", [
+                'endpoint' => 'reunion',
+                'date' => $date,
+                'reunion' => $reunionNum,
+                'status' => $response->status(),
+                'body_length' => strlen($response->body())
+            ]);
+
             return null;
         } catch (\Exception $e) {
-            Log::error("PMU Reunion Fetch Exception: {$e->getMessage()}");
+            Log::error("PMU Reunion Fetch Exception", [
+                'endpoint' => 'reunion',
+                'date' => $date,
+                'reunion' => $reunionNum,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
             return null;
         }
     }
@@ -65,14 +84,30 @@ class PMUFetcherService
             $response = Http::timeout(30)->get(
                 self::BASE_URL . "/programme/{$date}/R{$reunionNum}/C{$courseNum}/participants"
             );
-            
+
             if ($response->successful()) {
                 return $response->json();
             }
-            
+
+            Log::error("PMU API Error: {$response->status()}", [
+                'endpoint' => 'course',
+                'date' => $date,
+                'reunion' => $reunionNum,
+                'course' => $courseNum,
+                'status' => $response->status(),
+                'body_length' => strlen($response->body())
+            ]);
+
             return null;
         } catch (\Exception $e) {
-            Log::error("PMU Course Fetch Exception: {$e->getMessage()}");
+            Log::error("PMU Course Fetch Exception", [
+                'endpoint' => 'course',
+                'date' => $date,
+                'reunion' => $reunionNum,
+                'course' => $courseNum,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
             return null;
         }
     }

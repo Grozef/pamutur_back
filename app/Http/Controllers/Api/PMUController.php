@@ -4,34 +4,70 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Race;
-use App\Models\Horse;
 use App\Services\PMUStatisticsService;
 use App\Services\PMUFetcherService;
+use App\Services\ValueBetService;
+use App\Services\CombinationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
-use App\Http\Requests\RaceRequest;
-use App\Http\Requests\SearchRequest;
 
 class PMUController extends Controller
 {
     private PMUStatisticsService $stats;
     private PMUFetcherService $fetcher;
+    private ValueBetService $valueBets;
+    private CombinationService $combinations;
 
-    public function __construct(PMUStatisticsService $stats, PMUFetcherService $fetcher)
-    {
+    public function __construct(
+        PMUStatisticsService $stats,
+        PMUFetcherService $fetcher,
+        ValueBetService $valueBets,
+        CombinationService $combinations
+    ) {
         $this->stats = $stats;
         $this->fetcher = $fetcher;
+        $this->valueBets = $valueBets;
+        $this->combinations = $combinations;
     }
 
     /**
-     * Get today's programme (proxy to PMU API)
+     * Get all races by date (for TopHorses component)
+     */
+    public function getRacesByDate(Request $request): JsonResponse
+    {
+        $date = $request->query('date', date('Y-m-d'));
+
+        $cacheKey = "races_by_date_{$date}";
+
+        $races = Cache::remember($cacheKey, 1800, function() use ($date) {
+            return Race::whereDate('race_date', $date)
+                ->withCount('performances')
+                ->orderBy('race_date')
+                ->get()
+                ->map(function ($race) {
+                    return [
+                        'id' => $race->id,
+                        'code' => $race->race_code,
+                        'date' => $race->race_date->toIso8601String(),
+                        'hippodrome' => $race->hippodrome,
+                        'distance' => $race->distance,
+                        'discipline' => $race->discipline,
+                        'participants_count' => $race->performances_count
+                    ];
+                });
+        });
+
+        return response()->json($races);
+    }
+
+    /**
+     * Get today's programme (fetch from PMU API)
      */
     public function getProgramme(string $date): JsonResponse
     {
         try {
-            // Cache programme for 30 minutes
             $cacheKey = "pmu_programme_{$date}";
 
             $data = Cache::remember($cacheKey, 1800, function() use ($date) {
@@ -115,7 +151,7 @@ class PMUController extends Controller
     }
 
     /**
-     * Get race predictions (calculated probabilities) with caching
+     * Get race predictions with value bets
      */
     public function getRacePredictions(int $raceId): JsonResponse
     {
@@ -125,7 +161,6 @@ class PMUController extends Controller
             return response()->json(['error' => 'Race not found'], 404);
         }
 
-        // Cache predictions for 1 hour
         $cacheKey = "race_predictions_{$raceId}";
 
         $predictions = Cache::remember($cacheKey, 3600, function() use ($raceId) {
@@ -135,7 +170,7 @@ class PMUController extends Controller
         return response()->json([
             'race' => [
                 'id' => $race->id,
-                'date' => $race->race_date->format('c'), // FIXED: Use format('c') for ISO 8601
+                'date' => $race->race_date->toIso8601String(),
                 'hippodrome' => $race->hippodrome,
                 'distance' => $race->distance,
                 'discipline' => $race->discipline
@@ -147,197 +182,106 @@ class PMUController extends Controller
     }
 
     /**
-     * Clear cache for a specific race (useful after race results are updated)
+     * Get value bets with Kelly Criterion
      */
-    public function clearRaceCache(int $raceId): JsonResponse
+    public function getValueBets(int $raceId, Request $request): JsonResponse
     {
-        Cache::forget("race_predictions_{$raceId}");
+        $bankroll = $request->query('bankroll', 1000);
+
+        $predictions = $this->stats->getRacePredictions($raceId);
+
+        if ($predictions->isEmpty()) {
+            return response()->json(['error' => 'No predictions available'], 404);
+        }
+
+        $analysis = $this->valueBets->analyzeRaceValueBets($predictions, $bankroll);
 
         return response()->json([
-            'message' => 'Cache cleared successfully',
-            'race_id' => $raceId
+            'race_id' => $raceId,
+            'bankroll' => $bankroll,
+            'value_bets' => $analysis['value_bets'],
+            'summary' => [
+                'count' => $analysis['count'],
+                'total_stake' => $analysis['total_stake'],
+                'bankroll_usage' => $analysis['bankroll_usage'] . '%',
+                'total_expected_value' => $analysis['total_expected_value'] . '%'
+            ]
         ]);
     }
 
     /**
-     * Get horse details with statistics
+     * Get Tiercé combinations
      */
-    public function getHorseDetails(string $horseId): JsonResponse
+    public function getTierceCombinations(int $raceId, Request $request): JsonResponse
     {
-        $cacheKey = "horse_details_{$horseId}";
+        $ordre = filter_var($request->query('ordre', 'false'), FILTER_VALIDATE_BOOLEAN);
+        $limit = $request->query('limit', 10);
 
-        $data = Cache::remember($cacheKey, 7200, function() use ($horseId) {
-            $horse = Horse::with(['father', 'mother', 'performances.race'])
-                ->find($horseId);
+        $predictions = $this->stats->getRacePredictions($raceId);
 
-            if (!$horse) {
-                return null;
-            }
-
-            $careerStats = $horse->getCareerStats();
-
-            return [
-                'horse' => [
-                    'id' => $horse->id_cheval_pmu,
-                    'name' => $horse->name,
-                    'sex' => $horse->sex,
-                    'age' => $horse->age,
-                    'breed' => $horse->breed
-                ],
-                'genealogy' => [
-                    'father' => $horse->father ? [
-                        'id' => $horse->father->id_cheval_pmu,
-                        'name' => $horse->father->name
-                    ] : null,
-                    'mother' => $horse->mother ? [
-                        'id' => $horse->mother->id_cheval_pmu,
-                        'name' => $horse->mother->name
-                    ] : null,
-                    'dam_sire' => $horse->dam_sire_name
-                ],
-                'career_stats' => $careerStats,
-                'recent_performances' => $horse->performances()
-                    ->with(['race', 'jockey', 'trainer'])
-                    ->orderBy('created_at', 'desc')
-                    ->limit(10)
-                    ->get()
-                    ->map(function ($perf) {
-                        return [
-                            'date' => $perf->race->race_date->format('Y-m-d'),
-                            'hippodrome' => $perf->race->hippodrome,
-                            'distance' => $perf->race->distance,
-                            'rank' => $perf->rank,
-                            'jockey' => $perf->jockey?->name,
-                            'trainer' => $perf->trainer?->name,
-                            'odds' => $perf->odds_ref
-                        ];
-                    })
-            ];
-        });
-
-        if (!$data) {
-            return response()->json(['error' => 'Horse not found'], 404);
+        if ($predictions->isEmpty()) {
+            return response()->json(['error' => 'No predictions available'], 404);
         }
 
-        return response()->json($data);
-    }
+        $combinations = $ordre
+            ? $this->combinations->generateTierceOrdre($predictions, $limit)
+            : $this->combinations->generateTierceDesordre($predictions, $limit);
 
-    /**
-     * Get stallion progeny statistics
-     */
-    public function getStallionStats(string $horseId): JsonResponse
-    {
-        $cacheKey = "stallion_stats_{$horseId}";
-
-        $stats = Cache::remember($cacheKey, 7200, function() use ($horseId) {
-            return $this->stats->getStallionProgenyStats($horseId);
-        });
-
-        if (empty($stats)) {
-            return response()->json(['error' => 'Horse not found'], 404);
-        }
-
-        return response()->json($stats);
-    }
-
-    /**
-     * Search horses by name
-     */
-    public function searchHorses(SearchRequest $request): JsonResponse
-    {
-        $query = $request->validated()['q'];
-
-        $horses = Horse::where('name', 'LIKE', "%{$query}%")
-            ->limit(20)
-            ->get(['id_cheval_pmu', 'name', 'age', 'sex']);
-
-        return response()->json($horses);
-    }
-
-    /**
-     * Get races by date
-     */
-    public function getRacesByDate(RaceRequest $request): JsonResponse
-    {
-        $dateParam = $request->query('date', date('Y-m-d'));
-        $date = $this->normalizeDateFormat($dateParam);
-
-        $cacheKey = "races_by_date_{$date}";
-
-        $races = Cache::remember($cacheKey, 1800, function() use ($date) {
-            return Race::whereDate('race_date', $date)
-                ->with('performances')
-                ->get();
-        });
-
-        $mapped = $races->map(function ($race) {
-            return [
-                'id' => $race->id,
-                'code' => $race->race_code,
-                'date' => $race->race_date->format('c'), // FIXED: Use format('c')
-                'hippodrome' => $race->hippodrome,
-                'distance' => $race->distance,
-                'discipline' => $race->discipline,
-                'participants' => $race->getParticipantsCount()
-            ];
-        });
-
-        return response()->json($mapped->values());
-    }
-
-    /**
-     * Find race by code
-     */
-    public function findRaceByCode(Request $request): JsonResponse
-    {
-        $code = $request->query('code');
-
-        if (!$code) {
-            return response()->json(['error' => 'Code parameter required'], 400);
-        }
-
-        $race = Race::where('race_code', $code)->first();
-
-        if (!$race) {
-            return response()->json(['error' => 'Race not found'], 404);
+        foreach ($combinations as &$combo) {
+            $combo['ev_analysis'] = $this->combinations->calculateExpectedValue(
+                $combo,
+                $stake = 2,
+                $estimatedPayout = $ordre ? 80 : 50
+            );
         }
 
         return response()->json([
-            'id' => $race->id,
-            'code' => $race->race_code,
-            'date' => $race->race_date->format('c'), // FIXED: Use format('c')
-            'hippodrome' => $race->hippodrome,
-            'distance' => $race->distance,
-            'discipline' => $race->discipline
+            'race_id' => $raceId,
+            'type' => $ordre ? 'TIERCE_ORDRE' : 'TIERCE_DESORDRE',
+            'combinations' => $combinations,
+            'best_combination' => $combinations[0] ?? null
         ]);
     }
 
     /**
-     * Normalize date format - accept both Y-m-d and dmY formats
+     * Get Quinté combinations
      */
-    private function normalizeDateFormat(string $date): string
+    public function getQuinteCombinations(int $raceId, Request $request): JsonResponse
     {
-        if (strlen($date) === 10 && strpos($date, '-') !== false) {
-            return $date;
+        $limit = $request->query('limit', 10);
+
+        $predictions = $this->stats->getRacePredictions($raceId);
+
+        if ($predictions->isEmpty()) {
+            return response()->json(['error' => 'No predictions available'], 404);
         }
 
-        if (strlen($date) === 8) {
-            $dateObj = \DateTime::createFromFormat('dmY', $date);
-            return $dateObj ? $dateObj->format('Y-m-d') : $date;
+        $combinations = $this->combinations->generateQuinteDesordre($predictions, $limit);
+
+        foreach ($combinations as &$combo) {
+            $combo['ev_analysis'] = $this->combinations->calculateExpectedValue(
+                $combo,
+                $stake = 2,
+                $estimatedPayout = 500
+            );
         }
 
-        return $date;
+        return response()->json([
+            'race_id' => $raceId,
+            'type' => 'QUINTE_DESORDRE',
+            'combinations' => $combinations,
+            'best_combination' => $combinations[0] ?? null
+        ]);
     }
 
     /**
-     * Health check endpoint
+     * Health check
      */
     public function health(): JsonResponse
     {
         return response()->json([
             'status' => 'healthy',
             'timestamp' => now()->toIso8601String(),
-            'cache_driver' => config('cache.default'),
             'version' => 'v1'
         ]);
     }
