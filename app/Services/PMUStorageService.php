@@ -29,6 +29,13 @@ class PMUStorageService
             }
 
             DB::commit();
+
+            Log::info("Race stored successfully", [
+                'race_id' => $race->id,
+                'race_code' => $race->race_code,
+                'participants' => $race->performances()->count()
+            ]);
+
             return $race;
 
         } catch (\Exception $e) {
@@ -45,13 +52,13 @@ class PMUStorageService
 
     private function createRace(array $data, string $date, int $reunionNum, int $courseNum): Race
     {
-        // FIXED: Validate date format
+        // Validate date format
         $raceDate = \DateTime::createFromFormat('dmY', $date);
         if ($raceDate === false) {
             throw new \InvalidArgumentException("Invalid date format: {$date}. Expected dmY format.");
         }
 
-        // FIXED: Validate and parse time
+        // Validate and parse time
         if (isset($data['heureDepart'])) {
             $time = str_pad($data['heureDepart'], 4, '0', STR_PAD_LEFT);
 
@@ -59,7 +66,6 @@ class PMUStorageService
                 $hour = (int)substr($time, 0, 2);
                 $minute = (int)substr($time, 2, 2);
 
-                // Validate hour and minute ranges
                 if ($hour >= 0 && $hour <= 23 && $minute >= 0 && $minute <= 59) {
                     $raceDate->setTime($hour, $minute);
                 } else {
@@ -74,13 +80,19 @@ class PMUStorageService
             }
         }
 
+        // Extract hippodrome name from nested structure if needed
+        $hippodrome = $data['hippodrome'] ?? null;
+        if (is_array($hippodrome)) {
+            $hippodrome = $hippodrome['libelleCourt'] ?? $hippodrome['libelleLong'] ?? null;
+        }
+
         return Race::updateOrCreate(
             [
                 'race_code' => "R{$reunionNum}C{$courseNum}",
                 'race_date' => $raceDate
             ],
             [
-                'hippodrome' => $data['hippodrome'] ?? null,
+                'hippodrome' => $hippodrome,
                 'distance' => $this->validateDistance($data['distance'] ?? null),
                 'discipline' => $data['discipline'] ?? null,
                 'track_condition' => $data['penetrometre'] ?? null
@@ -102,6 +114,9 @@ class PMUStorageService
             $trainer = Trainer::firstOrCreate(['name' => $participant['entraineur']]);
         }
 
+        // FIX: Extract odds from nested object
+        $oddsRef = $this->extractOdds($participant);
+
         Performance::updateOrCreate(
             [
                 'horse_id' => $horse->id_cheval_pmu,
@@ -114,10 +129,42 @@ class PMUStorageService
                 'weight' => $this->validateWeight($participant['handicapPoids'] ?? null),
                 'draw' => $participant['placeCorde'] ?? null,
                 'raw_musique' => $participant['musique'] ?? null,
-                'odds_ref' => $participant['dernierRapportDirect'] ?? null,
+                'odds_ref' => $oddsRef,
                 'gains_race' => null
             ]
         );
+    }
+
+    /**
+     * FIX: Extract odds from various PMU API formats
+     */
+    private function extractOdds(array $participant): ?float
+    {
+        // Try dernierRapportDirect.rapport (most common)
+        if (isset($participant['dernierRapportDirect']['rapport'])) {
+            return (float) $participant['dernierRapportDirect']['rapport'];
+        }
+
+        // Try dernierRapportDirect as direct value
+        if (isset($participant['dernierRapportDirect']) && is_numeric($participant['dernierRapportDirect'])) {
+            return (float) $participant['dernierRapportDirect'];
+        }
+
+        // Try coteDirect
+        if (isset($participant['coteDirect']['rapport'])) {
+            return (float) $participant['coteDirect']['rapport'];
+        }
+
+        if (isset($participant['coteDirect']) && is_numeric($participant['coteDirect'])) {
+            return (float) $participant['coteDirect'];
+        }
+
+        // Try rapportProbable
+        if (isset($participant['rapportProbable'])) {
+            return (float) $participant['rapportProbable'];
+        }
+
+        return null;
     }
 
     private function createHorse(array $participant): Horse
@@ -239,7 +286,6 @@ class PMUStorageService
                 'weight_grams' => $weightInt,
                 'weight_kg' => $weightKg
             ]);
-            // Accept it anyway but log
         }
 
         return $weightInt;
