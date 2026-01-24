@@ -30,8 +30,16 @@ class DailyBetsController extends Controller
     public function getTopDailyBets(Request $request): JsonResponse
     {
         $date = $request->query('date', date('Y-m-d'));
-        $bankroll = $request->query('bankroll', 1000);
-        $limit = $request->query('limit', 5);
+        
+        // FIX: Validate bankroll like in PMUController
+        $bankroll = (float) $request->query('bankroll', 1000);
+        if ($bankroll < 10 || $bankroll > 1000000) {
+            return response()->json([
+                'error' => 'Bankroll must be between 10 and 1,000,000'
+            ], 400);
+        }
+        
+        $limit = min(max((int) $request->query('limit', 5), 1), 20);
 
         $cacheKey = "top_daily_bets_{$date}_{$bankroll}_{$limit}";
 
@@ -137,13 +145,20 @@ class DailyBetsController extends Controller
     }
 
     /**
-     * Get best combinations of the day (Tiercé/Quinté)
+     * Get best combinations of the day (Tierce/Quinte)
      */
     public function getTopDailyCombinations(Request $request): JsonResponse
     {
         $date = $request->query('date', date('Y-m-d'));
-        $type = $request->query('type', 'tierce'); // tierce or quinte
-        $limit = $request->query('limit', 3);
+        $type = $request->query('type', 'tierce');
+        $limit = min(max((int) $request->query('limit', 3), 1), 20);
+
+        // Validate type
+        if (!in_array($type, ['tierce', 'quinte'])) {
+            return response()->json([
+                'error' => 'Type must be "tierce" or "quinte"'
+            ], 400);
+        }
 
         $cacheKey = "top_daily_combos_{$date}_{$type}_{$limit}";
 
@@ -214,6 +229,10 @@ class DailyBetsController extends Controller
         ];
     }
 
+    /**
+     * FIX: Calculate tierce probability using conditional probabilities
+     * P(A, B, C in top 3 in any order) = sum of all 6 permutations
+     */
     private function getBestTierceForRace($race, $predictions): ?array
     {
         $top3 = $predictions->take(3);
@@ -222,9 +241,16 @@ class DailyBetsController extends Controller
             return null;
         }
 
-        $prob = ($top3[0]['probability'] / 100)
-              * ($top3[1]['probability'] / 100)
-              * ($top3[2]['probability'] / 100) * 6; // Désordre
+        $horses = $top3->values()->toArray();
+        $totalProb = $predictions->sum('probability');
+        
+        // Calculate probability using conditional probabilities for all 6 permutations
+        $prob = $this->calculateTrioPermutationProbability(
+            $horses[0]['probability'],
+            $horses[1]['probability'],
+            $horses[2]['probability'],
+            $totalProb
+        );
 
         return [
             'race_id' => $race->id,
@@ -233,9 +259,9 @@ class DailyBetsController extends Controller
             'hippodrome' => $race->hippodrome,
             'type' => 'TIERCE_DESORDRE',
             'horses' => [
-                $top3[0]['horse_name'],
-                $top3[1]['horse_name'],
-                $top3[2]['horse_name']
+                $horses[0]['horse_name'],
+                $horses[1]['horse_name'],
+                $horses[2]['horse_name']
             ],
             'probability' => min(100, $prob * 100),
             'estimated_payout' => 50,
@@ -243,6 +269,9 @@ class DailyBetsController extends Controller
         ];
     }
 
+    /**
+     * FIX: Calculate quinte probability using conditional probabilities
+     */
     private function getBestQuinteForRace($race, $predictions): ?array
     {
         $top5 = $predictions->take(5);
@@ -251,11 +280,18 @@ class DailyBetsController extends Controller
             return null;
         }
 
-        $prob = ($top5[0]['probability'] / 100)
-              * ($top5[1]['probability'] / 100)
-              * ($top5[2]['probability'] / 100)
-              * ($top5[3]['probability'] / 100)
-              * ($top5[4]['probability'] / 100) * 120; // Désordre
+        $horses = $top5->values()->toArray();
+        $totalProb = $predictions->sum('probability');
+        
+        // Calculate probability using conditional probabilities
+        $prob = $this->calculateQuintePermutationProbability(
+            $horses[0]['probability'],
+            $horses[1]['probability'],
+            $horses[2]['probability'],
+            $horses[3]['probability'],
+            $horses[4]['probability'],
+            $totalProb
+        );
 
         return [
             'race_id' => $race->id,
@@ -264,15 +300,81 @@ class DailyBetsController extends Controller
             'hippodrome' => $race->hippodrome,
             'type' => 'QUINTE_DESORDRE',
             'horses' => [
-                $top5[0]['horse_name'],
-                $top5[1]['horse_name'],
-                $top5[2]['horse_name'],
-                $top5[3]['horse_name'],
-                $top5[4]['horse_name']
+                $horses[0]['horse_name'],
+                $horses[1]['horse_name'],
+                $horses[2]['horse_name'],
+                $horses[3]['horse_name'],
+                $horses[4]['horse_name']
             ],
             'probability' => min(100, $prob * 100),
             'estimated_payout' => 500,
             'recommended_stake' => 2
         ];
+    }
+
+    /**
+     * Calculate probability of 3 horses finishing in top 3 in any order
+     * Sum of conditional probabilities for all 6 permutations
+     */
+    private function calculateTrioPermutationProbability(
+        float $pA,
+        float $pB,
+        float $pC,
+        float $total
+    ): float {
+        if ($total <= 0) return 0;
+        
+        $prob = 0;
+        $horses = [$pA, $pB, $pC];
+
+        // Generate all 6 permutations
+        $permutations = [
+            [0, 1, 2], [0, 2, 1], [1, 0, 2],
+            [1, 2, 0], [2, 0, 1], [2, 1, 0]
+        ];
+
+        foreach ($permutations as $perm) {
+            $p1 = $horses[$perm[0]] / $total;
+            $remaining1 = $total - $horses[$perm[0]];
+
+            $p2 = $remaining1 > 0 ? $horses[$perm[1]] / $remaining1 : 0;
+            $remaining2 = $remaining1 - $horses[$perm[1]];
+
+            $p3 = $remaining2 > 0 ? $horses[$perm[2]] / $remaining2 : 0;
+
+            $prob += $p1 * $p2 * $p3;
+        }
+
+        return $prob;
+    }
+
+    /**
+     * Calculate probability of 5 horses in top 5 (any order)
+     * Uses analytical approximation for efficiency
+     */
+    private function calculateQuintePermutationProbability(
+        float $p1, float $p2, float $p3, float $p4, float $p5,
+        float $total
+    ): float {
+        if ($total <= 0) return 0;
+        
+        $horses = [$p1, $p2, $p3, $p4, $p5];
+
+        // Calculate probability that all 5 horses finish in top 5
+        $probAllInTop5 = 1.0;
+        $remaining = $total;
+
+        foreach ($horses as $prob) {
+            if ($remaining <= 0) {
+                $probAllInTop5 = 0;
+                break;
+            }
+            $positionProb = $prob / $remaining;
+            $probAllInTop5 *= $positionProb;
+            $remaining -= $prob;
+        }
+
+        // Multiply by 5! = 120 for all orderings
+        return $probAllInTop5 * 120;
     }
 }

@@ -7,122 +7,60 @@ use Illuminate\Support\Facades\Log;
 
 class PMUFetcherService
 {
-    private const BASE_URL = 'https://online.turfinfo.api.pmu.fr/rest/client/1';
+    private const BASE_URL = 'https://offline.turfinfo.api.pmu.fr/rest/client/7';
 
-    /**
-     * Fetch daily program for a specific date
-     */
     public function fetchProgramme(string $date): ?array
     {
-        try {
-            $response = Http::timeout(30)->get(self::BASE_URL . "/programme/{$date}");
-
-            if ($response->successful()) {
-                return $response->json();
-            }
-
-            Log::error("PMU API Error: {$response->status()}", [
-                'endpoint' => 'programme',
-                'date' => $date,
-                'status' => $response->status(),
-                'body_length' => strlen($response->body())
-            ]);
-
-            return null;
-        } catch (\Exception $e) {
-            Log::error("PMU Fetch Exception", [
-                'endpoint' => 'programme',
-                'date' => $date,
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ]);
-            return null;
-        }
+        return $this->doFetch("/programme/{$date}");
     }
 
-    /**
-     * Fetch reunion data
-     */
     public function fetchReunion(string $date, int $reunionNum): ?array
     {
-        try {
-            $response = Http::timeout(30)->get(
-                self::BASE_URL . "/programme/{$date}/R{$reunionNum}"
-            );
-
-            if ($response->successful()) {
-                return $response->json();
-            }
-
-            Log::error("PMU API Error: {$response->status()}", [
-                'endpoint' => 'reunion',
-                'date' => $date,
-                'reunion' => $reunionNum,
-                'status' => $response->status(),
-                'body_length' => strlen($response->body())
-            ]);
-
-            return null;
-        } catch (\Exception $e) {
-            Log::error("PMU Reunion Fetch Exception", [
-                'endpoint' => 'reunion',
-                'date' => $date,
-                'reunion' => $reunionNum,
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ]);
-            return null;
-        }
+        return $this->doFetch("/programme/{$date}/R{$reunionNum}");
     }
 
-    /**
-     * Fetch course data with participants
-     */
     public function fetchCourse(string $date, int $reunionNum, int $courseNum): ?array
     {
+        return $this->doFetch("/programme/{$date}/R{$reunionNum}/C{$courseNum}/participants");
+    }
+
+    private function doFetch(string $endpoint): ?array
+    {
+        $url = self::BASE_URL . $endpoint;
+
         try {
-            $response = Http::timeout(30)->get(
-                self::BASE_URL . "/programme/{$date}/R{$reunionNum}/C{$courseNum}/participants"
-            );
+            $response = Http::timeout(30)
+                ->withHeaders([
+                    'Accept' => 'application/json',
+                    'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                ])
+                ->get($url);
 
             if ($response->successful()) {
                 return $response->json();
             }
 
-            Log::error("PMU API Error: {$response->status()}", [
-                'endpoint' => 'course',
-                'date' => $date,
-                'reunion' => $reunionNum,
-                'course' => $courseNum,
-                'status' => $response->status(),
-                'body_length' => strlen($response->body())
+            Log::warning("PMU API Error", [
+                'url' => $url,
+                'status' => $response->status()
             ]);
 
             return null;
+
         } catch (\Exception $e) {
-            Log::error("PMU Course Fetch Exception", [
-                'endpoint' => 'course',
-                'date' => $date,
-                'reunion' => $reunionNum,
-                'course' => $courseNum,
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
+            Log::error("PMU API Exception", [
+                'url' => $url,
+                'error' => $e->getMessage()
             ]);
             return null;
         }
     }
 
-    /**
-     * Format date to DDMMYYYY
-     */
     public function formatDate(\DateTime $date): string
     {
         return $date->format('dmY');
     }
 
-    /**
-     * Get today's date in DDMMYYYY format
-     */
     public function getTodayDate(): string
     {
         return $this->formatDate(new \DateTime());

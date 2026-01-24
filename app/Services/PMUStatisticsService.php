@@ -194,7 +194,7 @@ class PMUStatisticsService
         $score = 5.0;
 
         try {
-            // FIXED: Safe access to race with null check
+            // Safe access to race with null check
             if ($performance->draw) {
                 $race = $performance->race;
 
@@ -269,6 +269,7 @@ class PMUStatisticsService
                 'scenario' => 'INSUFFICIENT_DATA',
                 'top_size' => $count,
                 'top_percentage' => 100,
+                'rest_percentage' => 0,
                 'description' => 'Pas assez de partants'
             ];
         }
@@ -346,7 +347,7 @@ class PMUStatisticsService
         $startTime = microtime(true);
 
         try {
-            // FIXED: Ensure race relationship is loaded
+            // Ensure race relationship is loaded
             $performances = Performance::with(['horse', 'jockey', 'trainer', 'race'])
                 ->where('race_id', $raceId)
                 ->get();
@@ -391,9 +392,14 @@ class PMUStatisticsService
             $scenario = $this->detectRaceScenario($scoredHorses->toArray());
             $predictions = $this->distributeProbabilities($scoredHorses, $scenario);
 
+            // FIX: Properly propagate race_scenario to the first prediction
             if ($predictions->isNotEmpty()) {
-                $firstPrediction = $predictions->first();
-                $firstPrediction['race_scenario'] = $scenario;
+                $predictions = $predictions->map(function ($pred, $index) use ($scenario) {
+                    if ($index === 0) {
+                        $pred['race_scenario'] = $scenario;
+                    }
+                    return $pred;
+                });
             }
 
             $duration = (microtime(true) - $startTime) * 1000;
