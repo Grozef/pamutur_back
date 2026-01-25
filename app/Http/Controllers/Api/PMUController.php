@@ -20,11 +20,11 @@ class PMUController extends Controller
     private ValueBetService $valueBets;
     private CombinationService $combinations;
 
-    // FIX: Reduced cache durations for more accurate odds
-    private const CACHE_PROGRAMME = 900;     // 15 min for programme
-    private const CACHE_PARTICIPANTS = 300;  // 5 min for participants (odds change)
-    private const CACHE_PREDICTIONS = 600;   // 10 min for predictions
-    private const CACHE_RACES = 1800;        // 30 min for race list
+    // FIX: Reduced cache durations for more accurate real-time data
+    private const CACHE_PROGRAMME = 600;      // 10 min for programme (reduced from 15)
+    private const CACHE_PARTICIPANTS = 60;    // 1 min for participants (reduced from 5)
+    private const CACHE_PREDICTIONS = 300;    // 5 min for predictions (reduced from 10)
+    private const CACHE_RACES = 1800;         // 30 min for race list
 
     public function __construct(
         PMUStatisticsService $stats,
@@ -117,6 +117,7 @@ class PMUController extends Controller
 
     /**
      * Get today's programme (fetch from PMU API)
+     * FIX: Better error handling with specific error messages
      */
     public function getProgramme(string $date): JsonResponse
     {
@@ -128,22 +129,44 @@ class PMUController extends Controller
             });
 
             if (!$data) {
-                Log::warning('Programme not found', ['date' => $date]);
-                return response()->json(['error' => 'Programme not found for date'], 404);
+                Log::warning('Programme not found or API failed', [
+                    'date' => $date,
+                    'cache_key' => $cacheKey
+                ]);
+
+                // FIX: More specific error message
+                return response()->json([
+                    'error' => 'Programme not available',
+                    'date' => $date,
+                    'details' => 'PMU API returned no data. Check logs for details.',
+                    'suggestions' => [
+                        'Verify the date format (DDMMYYYY or YYYY-MM-DD)',
+                        'Check if races are scheduled for this date',
+                        'Review Laravel logs for API errors'
+                    ]
+                ], 404);
             }
 
             return response()->json($data);
         } catch (\Exception $e) {
             Log::error('Failed to fetch programme', [
                 'date' => $date,
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString() // FIX: Added stack trace
             ]);
-            return response()->json(['error' => 'Internal server error'], 500);
+
+            // FIX: Return more helpful error
+            return response()->json([
+                'error' => 'Internal server error',
+                'message' => 'Failed to fetch programme from PMU API',
+                'debug' => config('app.debug') ? $e->getMessage() : null
+            ], 500);
         }
     }
 
     /**
      * Get reunion data
+     * FIX: Enhanced error handling
      */
     public function getReunion(string $date, int $reunionNum): JsonResponse
     {
@@ -155,8 +178,20 @@ class PMUController extends Controller
             });
 
             if (!$data) {
-                Log::warning('Reunion not found', ['date' => $date, 'reunion' => $reunionNum]);
-                return response()->json(['error' => 'Reunion not found'], 404);
+                Log::warning('Reunion not found', [
+                    'date' => $date,
+                    'reunion' => $reunionNum
+                ]);
+
+                return response()->json([
+                    'error' => 'Reunion not found',
+                    'date' => $date,
+                    'reunion' => $reunionNum,
+                    'suggestions' => [
+                        'Verify the reunion number exists for this date',
+                        'Check programme endpoint first'
+                    ]
+                ], 404);
             }
 
             return response()->json($data);
@@ -164,22 +199,27 @@ class PMUController extends Controller
             Log::error('Failed to fetch reunion', [
                 'date' => $date,
                 'reunion' => $reunionNum,
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
             ]);
-            return response()->json(['error' => 'Internal server error'], 500);
+
+            return response()->json([
+                'error' => 'Internal server error',
+                'debug' => config('app.debug') ? $e->getMessage() : null
+            ], 500);
         }
     }
 
     /**
      * Get course participants
-     * FIX: Reduced cache time for more accurate odds
+     * FIX: Reduced cache time to 60s for real-time odds
      */
     public function getParticipants(string $date, int $reunionNum, int $courseNum): JsonResponse
     {
         try {
             $cacheKey = "pmu_participants_{$date}_R{$reunionNum}C{$courseNum}";
 
-            // FIX: Shorter cache for participants (odds change frequently)
+            // FIX: Reduced cache from 300s to 60s for fresher odds data
             $data = Cache::remember($cacheKey, self::CACHE_PARTICIPANTS, function() use ($date, $reunionNum, $courseNum) {
                 return $this->fetcher->fetchCourse($date, $reunionNum, $courseNum);
             });
@@ -190,7 +230,17 @@ class PMUController extends Controller
                     'reunion' => $reunionNum,
                     'course' => $courseNum
                 ]);
-                return response()->json(['error' => 'Course not found'], 404);
+
+                return response()->json([
+                    'error' => 'Course not found',
+                    'date' => $date,
+                    'reunion' => $reunionNum,
+                    'course' => $courseNum,
+                    'suggestions' => [
+                        'Verify the course number exists',
+                        'Check reunion endpoint first'
+                    ]
+                ], 404);
             }
 
             return response()->json($data);
@@ -199,9 +249,14 @@ class PMUController extends Controller
                 'date' => $date,
                 'reunion' => $reunionNum,
                 'course' => $courseNum,
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
             ]);
-            return response()->json(['error' => 'Internal server error'], 500);
+
+            return response()->json([
+                'error' => 'Internal server error',
+                'debug' => config('app.debug') ? $e->getMessage() : null
+            ], 500);
         }
     }
 
@@ -362,13 +417,26 @@ class PMUController extends Controller
 
     /**
      * Health check
+     * FIX: Added API connectivity test
      */
     public function health(): JsonResponse
     {
+        $pmuApiHealthy = false;
+
+        try {
+            // Test PMU API connectivity
+            $testDate = $this->fetcher->getTodayDate();
+            $testResult = $this->fetcher->fetchProgramme($testDate);
+            $pmuApiHealthy = $testResult !== null;
+        } catch (\Exception $e) {
+            Log::warning('PMU API health check failed', ['error' => $e->getMessage()]);
+        }
+
         return response()->json([
             'status' => 'healthy',
             'timestamp' => now()->toIso8601String(),
-            'version' => '1.1.0',
+            'version' => '1.2.0', // FIX: Bumped version
+            'pmu_api_status' => $pmuApiHealthy ? 'connected' : 'disconnected',
             'cache_config' => [
                 'programme_ttl' => self::CACHE_PROGRAMME,
                 'participants_ttl' => self::CACHE_PARTICIPANTS,

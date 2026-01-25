@@ -107,6 +107,7 @@ class ValueBetService
                 $valueBets[] = [
                     'horse_id' => $prediction['horse_id'],
                     'horse_name' => $prediction['horse_name'],
+                    'draw' => $prediction['draw'],
                     'probability' => $prediction['probability'],
                     'odds' => $prediction['odds_ref'],
                     'kelly_data' => $kelly

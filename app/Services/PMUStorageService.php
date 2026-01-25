@@ -127,7 +127,7 @@ class PMUStorageService
                 'trainer_id' => $trainer?->id,
                 'rank' => null,
                 'weight' => $this->validateWeight($participant['handicapPoids'] ?? null),
-                'draw' => $participant['placeCorde'] ?? null,
+                'draw' => $participant['numPmu'] ?? $participant['placeCorde'] ?? $participant['numero'] ?? null,
                 'raw_musique' => $participant['musique'] ?? null,
                 'odds_ref' => $oddsRef,
                 'gains_race' => null

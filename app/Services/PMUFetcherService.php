@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\Log;
 
 class PMUFetcherService
 {
-    private const BASE_URL = 'https://offline.turfinfo.api.pmu.fr/rest/client/7';
+    private const BASE_URL = 'online.turfinfo.api.pmu.fr/rest/client/1';
 
     public function fetchProgramme(string $date): ?array
     {
