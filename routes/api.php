@@ -64,6 +64,24 @@ Route::prefix('pmu')->middleware('throttle:120,1')->group(function () {
         Route::post('/manual-bets', [BettingController::class, 'addManualBet']);
         Route::get('/manual-bets', [BettingController::class, 'getManualBets']);
         Route::delete('/manual-bets/{id}', [BettingController::class, 'deleteManualBet']);
+
+        // Manual combinations (COUPLE and TRIO)
+        Route::post('/manual-combinations', [BettingController::class, 'addManualCombination']);
+        Route::get('/manual-combinations', [BettingController::class, 'getManualCombinations']);
+        Route::delete('/manual-combinations/{id}', [BettingController::class, 'deleteManualCombination']);
+
+        // Get summary of all manual bets + combinations
+        Route::get('/manual-bets-summary', [BettingController::class, 'getManualBetsSummary']);
+
+        // DELETE individual bets
+Route::delete('/daily-bets/{id}', [BettingController::class, 'deleteDailyBet']);
+Route::delete('/value-bets/{id}', [BettingController::class, 'deleteValueBet']);
+Route::delete('/combinations/{id}', [BettingController::class, 'deleteCombination']);
+
+// Manual combinations
+Route::post('/manual-combinations', [BettingController::class, 'addManualCombination']);
+Route::get('/manual-combinations', [BettingController::class, 'getManualCombinations']);
+Route::delete('/manual-combinations/{id}', [BettingController::class, 'deleteManualCombination']);
     });
 
     // =====================================================

@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class BetCombination extends Model
 {
@@ -33,6 +34,8 @@ class BetCombination extends Model
 
     /**
      * Generate combinations from daily bets and value bets
+     *
+     * FIXED: Added validation that race_id exists before creating combinations
      */
     public static function generateCombinations(string $date): int
     {
@@ -53,16 +56,32 @@ class BetCombination extends Model
         $allRaces = $dailyBets->keys()->merge($valueBets->keys())->unique();
 
         foreach ($allRaces as $raceId) {
+            // FIXED: Validate that race exists in database
+            $race = Race::find($raceId);
+            if (!$race) {
+                Log::warning("Race {$raceId} not found in database, skipping combinations", [
+                    'date' => $date,
+                    'race_id' => $raceId
+                ]);
+                continue;
+            }
+
             $raceDailyBets = $dailyBets->get($raceId, collect());
             $raceValueBets = $valueBets->get($raceId, collect());
-            
+
             // Merge and deduplicate horses
             $allHorses = $raceDailyBets->merge($raceValueBets)
                 ->unique('horse_id')
                 ->sortByDesc('probability');
 
             if ($allHorses->count() >= 2) {
-                $count += self::createCombinationsForRace($date, $raceId, $allHorses);
+                $created = self::createCombinationsForRace($date, $raceId, $allHorses);
+                $count += $created;
+
+                Log::info("Created {$created} combinations for race {$raceId}", [
+                    'date' => $date,
+                    'horses_count' => $allHorses->count()
+                ]);
             }
         }
 
@@ -83,6 +102,7 @@ class BetCombination extends Model
                 $horse1 = $horseArray[$i];
                 $horse2 = $horseArray[$j];
 
+                // Simple multiplication (assumes independence - could be improved with conditional probabilities)
                 $combinedProb = $horse1->probability * $horse2->probability;
 
                 self::updateOrCreate(
@@ -154,5 +174,21 @@ class BetCombination extends Model
     public static function markAsProcessed(array $combinationIds): int
     {
         return self::whereIn('id', $combinationIds)->update(['is_processed' => true]);
+    }
+
+    /**
+     * Get best combinations for a race
+     */
+    public static function getBestCombinationsForRace(int $raceId, string $type = null, int $limit = 5)
+    {
+        $query = self::where('race_id', $raceId)
+            ->orderByDesc('combined_probability')
+            ->limit($limit);
+
+        if ($type) {
+            $query->where('combination_type', strtoupper($type));
+        }
+
+        return $query->get();
     }
 }

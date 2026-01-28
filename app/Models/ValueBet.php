@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\Log;
 
 class ValueBet extends Model
 {
@@ -42,21 +43,52 @@ class ValueBet extends Model
 
     /**
      * Store top 20 value bets BY PROBABILITY (highest first)
+     * BUT filter out probabilities < 20% and invalid odds
+     *
+     * FIXED:
+     * - Filter probability < 0.20 (20%)
+     * - Filter invalid odds (null, 0, or <= 1.0)
+     * - Calculate value_score for all valid bets
+     * - Sort by PROBABILITY (as requested)
+     * - Take top 20
      */
     public static function storeValueBets(string $date, array $predictions): int
     {
-        // Sort by PROBABILITY (not Kelly score) and take top 20
+        // Filter and calculate value scores
         $valueBets = collect($predictions)
-            ->sortByDesc('probability')
+            ->filter(function ($bet) {
+                // Filter out probabilities < 20%
+                if (!isset($bet['probability']) || $bet['probability'] < 0.20 || $bet['probability'] > 1) {
+                    return false;
+                }
+
+                // Skip if no odds or invalid odds
+                if (!isset($bet['odds']) || $bet['odds'] === null || $bet['odds'] <= 1.0) {
+                    return false;
+                }
+
+                return true;
+            })
+            ->map(function ($bet) {
+                // Calculate value score for reference
+                $bet['value_score'] = ($bet['probability'] * $bet['odds']) - 1;
+                return $bet;
+            })
+            ->sortByDesc('probability')  // Sort by PROBABILITY (as requested)
             ->take(20)
             ->values();
 
-        // Store top 20
+        // Log statistics for debugging
+        Log::info('ValueBets filtering', [
+            'total_predictions' => count($predictions),
+            'after_filter_20_percent' => $valueBets->count(),
+            'best_probability' => $valueBets->first()['probability'] ?? 'none',
+            'worst_probability' => $valueBets->last()['probability'] ?? 'none'
+        ]);
+
+        // Store top 20 value bets
         $count = 0;
         foreach ($valueBets as $index => $bet) {
-            // Calculate value score for reference
-            $valueScore = ($bet['probability'] * ($bet['odds'] ?? 0)) - 1;
-            
             self::updateOrCreate(
                 [
                     'bet_date' => $date,
@@ -66,8 +98,8 @@ class ValueBet extends Model
                 [
                     'horse_name' => $bet['horse_name'],
                     'estimated_probability' => $bet['probability'],
-                    'offered_odds' => $bet['odds'] ?? null,
-                    'value_score' => $valueScore,
+                    'offered_odds' => $bet['odds'],
+                    'value_score' => $bet['value_score'],
                     'ranking' => $index + 1,
                     'metadata' => $bet['metadata'] ?? null
                 ]
@@ -96,5 +128,35 @@ class ValueBet extends Model
     public static function markAsProcessed(array $betIds): int
     {
         return self::whereIn('id', $betIds)->update(['is_processed' => true]);
+    }
+
+    /**
+     * Get top N value bets for a date (ordered by probability)
+     */
+    public static function getTopValueBets(string $date, int $limit = 10)
+    {
+        return self::where('bet_date', $date)
+            ->orderBy('ranking')
+            ->limit($limit)
+            ->with(['race', 'horse'])
+            ->get();
+    }
+
+    /**
+     * Calculate expected profit for this bet with 10€ stake
+     */
+    public function getExpectedProfit(float $stake = 10): float
+    {
+        return $stake * $this->value_score;
+    }
+
+    /**
+     * Check if this is a valid value bet
+     */
+    public function isValidValueBet(): bool
+    {
+        return $this->estimated_probability >= 0.20
+            && $this->offered_odds > 1.0
+            && $this->estimated_probability <= 1;
     }
 }
