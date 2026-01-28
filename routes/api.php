@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\PMUController;
 use App\Http\Controllers\Api\MonitoringController;
 use App\Http\Controllers\Api\DailyBetsController;
+use App\Http\Controllers\Api\BettingController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -26,6 +27,44 @@ Route::prefix('pmu')->middleware('throttle:120,1')->group(function () {
     // =====================================================
     Route::get('/daily/top-bets', [DailyBetsController::class, 'getTopDailyBets']);
     Route::get('/daily/top-combinations', [DailyBetsController::class, 'getTopDailyCombinations']);
+
+    // =====================================================
+    // Betting System Routes
+    // =====================================================
+    Route::prefix('betting')->group(function () {
+        // Process predictions (store bets with probability > 40% and value bets)
+        Route::post('/process-predictions', [BettingController::class, 'processPredictions']);
+
+        // Get daily bets
+        Route::get('/daily-bets', [BettingController::class, 'getDailyBets']);
+
+        // Get value bets (top 20)
+        Route::get('/value-bets', [BettingController::class, 'getValueBets']);
+
+        // Get combinations
+        Route::get('/combinations', [BettingController::class, 'getCombinations']);
+
+        // Fetch results from previous day
+        Route::post('/fetch-results', [BettingController::class, 'fetchResults']);
+
+        // Get race results
+        Route::get('/race-results', [BettingController::class, 'getRaceResults']);
+
+        // Generate daily report
+        Route::get('/generate-report', [BettingController::class, 'generateReport']);
+
+        // Delete bets for a date
+        Route::delete('/clear', [BettingController::class, 'deleteBets']);
+
+        // Manual Kelly bets
+        Route::post('/kelly-bets', [BettingController::class, 'addKellyBet']);
+        Route::get('/kelly-bets', [BettingController::class, 'getKellyBets']);
+
+        // Manual bets (simple + couplé placé)
+        Route::post('/manual-bets', [BettingController::class, 'addManualBet']);
+        Route::get('/manual-bets', [BettingController::class, 'getManualBets']);
+        Route::delete('/manual-bets/{id}', [BettingController::class, 'deleteManualBet']);
+    });
 
     // =====================================================
     // Monitoring routes (protected)
